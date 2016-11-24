@@ -1,0 +1,292 @@
+---
+title: "An Attempt At The Titanic Competition"
+output:
+  html_document:
+    toc: yes
+  html_notebook:
+    number_sections: yes
+    toc: yes
+---
+# Introduction
+This notebook is meant to serve as a playground for me to play with the `h2o` package.
+
+## Libraries and data
+Load the required libraries:
+```{r}
+library(magrittr)
+library(ggplot2)
+library(scales)
+# library(caret)
+library(h2o)
+```
+Import the data set:
+```{r}
+train.df <-
+  read.csv(
+  './input/train.csv',
+  colClasses = c(
+  'character',
+  'factor',
+  'factor',
+  'character',
+  'factor',
+  'numeric',
+  'integer',
+  'integer',
+  'character',
+  'numeric',
+  'factor',
+  'factor'
+  ),
+  na.strings = c('')
+  )
+
+test.df <-
+  read.csv(
+  './input/test.csv',
+  colClasses = c(
+  'character',
+  'factor',
+  'character',
+  'factor',
+  'numeric',
+  'integer',
+  'integer',
+  'character',
+  'numeric',
+  'factor',
+  'factor'
+  )
+  )
+```
+
+# Data Pre-Processing
+## Feature Engineering
+Combine the train and test data frames:
+```{r}
+consol.df <- (train.df %>%
+                dplyr::mutate(label = 'train')) %>%
+                dplyr::bind_rows((test.df %>%
+                dplyr::mutate(label = 'test')))
+```
+
+Incorporate features discussed in [Exploring Survival on the Titanic](https://www.kaggle.com/mrisdal/titanic/exploring-survival-on-the-titanic/discussion).
+
+Create a Title variable and view its counts by Sex:
+```{r}
+consol.df %<>%
+  dplyr::mutate(Title = gsub('(.*, )|(\\..*)', '', Name))
+
+table(consol.df$Sex, consol.df$Title)
+```
+Combine rare titles (and reassign some titles) then display the counts again:
+```{r}
+rare_title <- c(
+  'Dona',
+  'Lady',
+  'the Countess',
+  'Capt',
+  'Col',
+  'Don',
+  'Dr',
+  'Major',
+  'Rev',
+  'Sir',
+  'Jonkheer'
+  )
+consol.df %<>%
+  dplyr::mutate(Title = ifelse(Title %in% rare_title, 'Rare Title', Title)) %>%
+  dplyr::mutate(
+  Title = ifelse(Title == 'Mlle', 'Miss', Title),
+  Title = ifelse(Title == 'Ms', 'Miss', Title),
+  Title = ifelse(Title == 'Mme', 'Mrs', Title)
+  )
+  
+table(consol.df$Sex, consol.df$Title)
+```
+Create a Surname variable:
+```{r}
+consol.df %<>%
+  dplyr::mutate(Surname = stringr::str_replace(Name, '(.*), .*', '\\1'))
+
+```
+There are `r length(unique(consol.df$Surname))` unique usernames.
+
+Create a family size:
+```{r}
+consol.df %<>%
+  dplyr::mutate(Fsize = SibSp + Parch + 1,
+                FsizeD = ifelse(Fsize == 1, 'singleton', 'NA'),
+                FsizeD = ifelse(Fsize > 1 & Fsize < 5, 'small', FsizeD),
+                FsizeD = ifelse(Fsize >= 5, 'large', FsizeD)
+  )
+
+```
+## Missing Data
+View missing data pattern:
+```{r}
+Amelia::missmap(consol.df)
+```
+Try to impute Age and Embarked. Give up on Cabin (too many missing values)
+
+### Impute Missing `Embarked` values
+View the `Pclass` and `Fare` of the passengers with the missing `Embarked` values:
+```{r}
+consol.df %>%
+  dplyr::filter(is.na(Embarked)) %>%
+  dplyr::select(Embarked, Pclass, Fare)
+```
+Vizualize relationship between `Fare` and `Embarked` accross `Pclass`:
+```{r}
+ggplot(dplyr::filter(consol.df,!is.na(Embarked)),
+       aes(
+       x = Embarked,
+       y = Fare,
+       fill = factor(Pclass)
+       )) +
+  geom_boxplot() +
+  geom_hline(aes(yintercept = 80),
+             color = 'red',
+             linetype = 'dashed') + 
+  scale_y_continuous(labels=dollar_format())
+```
+Threfore, we assume the `Embarked` value for the two missing values to be *C*:
+```{r}
+consol.df %<>%
+  dplyr::mutate(Embarked = dplyr::case_when(
+  is.na(consol.df$Embarked) ~ 'C',
+  TRUE ~ as.character(consol.df$Embarked)
+  )) %>%
+  dplyr::mutate(Embarked = as.factor(Embarked))
+  
+  summary(consol.df)
+```
+Fix the one missing value in Fare:
+```{r}
+consol.df %>%
+  dplyr::filter(is.na(Fare)) %>%
+  dplyr::select(Fare, Pclass, Embarked)
+```
+Replace that missing value with the median `Fare` for observations with `Pclass` equals 3 and `Embarked` equals S:
+```{r}
+mFare <- consol.df %>%
+  dplyr::filter(Pclass == '3' & Embarked == 'S' & !is.na(Fare)) %>%
+  dplyr::select(Fare) %>%
+  {
+    median(.$Fare)
+  }
+
+consol.df %<>%
+  dplyr::mutate(Fare = ifelse(is.na(Fare), mFare, Fare))
+```
+Create a Child/Not Child variable:
+```{r}
+consol.df %<>%
+  dplyr::mutate(Child = ifelse(Age < 18, 'Child', 'Note Child'))
+```
+Create a Mother variable:
+```{r}
+consol.df %<>%
+  dplyr::mutate(Mother = ifelse(Sex == 'female' & Parch > 0 & Age > 18 & Title != 'Miss', 'Mother', 'Not Mother'))
+```
+## Last Steps
+Drop unneeded variables:
+```{r}
+consol.df %<>%
+  dplyr::select( -Cabin, -Name, - Ticket, -Surname, -Fsize) 
+```
+Check variable types are correct:
+```{r}
+summary(consol.df)
+```
+```{r}
+consol.df %<>%
+  dplyr::mutate_each(c('as.factor'), Title:Mother)
+```
+Split back into the training and test set:
+```{r}
+train.df <- consol.df %>%
+  dplyr::filter(label == 'train') %>%
+  dplyr::select(-PassengerId, -label)
+
+test.df <- consol.df %>%
+  dplyr::filter(label == 'test') %>%
+  dplyr::select(-label)
+```
+# Prediction
+Create an H2O instance:
+```{r}
+h2o.init(nthreads=-1, max_mem_size='4G')
+```
+Send `train.df` and `test.df` to h2o:
+```{r}
+train.hex <- as.h2o(train.df, destination_frame = 'train.hex')
+test.hex <- as.h2o(test.df, destination_frame = 'test.hex')
+```
+Run a deep learning algorithm with random grid search:
+```{r}
+hyper_params <- list(
+  activation = c(
+  "Rectifier",
+  "Tanh",
+  "Maxout",
+  "RectifierWithDropout",
+  "TanhWithDropout",
+  "MaxoutWithDropout"
+  ),
+  hidden = list(c(200, 200), c(200), c(400), c(400, 200, 100), c(200,200,200)),
+  input_dropout_ratio = c(0, 0.05),
+  l1 = seq(0, 1e-4, 1e-6),
+  l2 = seq(0, 1e-4, 1e-6)
+  )
+  
+  search_criteria <-
+  list(
+  strategy = "RandomDiscrete",
+  max_runtime_secs = 10800,
+  max_models = 100,
+  seed = 1234567,
+  stopping_rounds = 5,
+  stopping_tolerance = 1e-2
+  )
+  
+  dl_random_grid <- h2o.grid(
+  algorithm = "deeplearning",
+  grid_id = "dl_grid_random",
+  training_frame = train.hex,
+  x = 2:12,
+  y = 1,
+  epochs = 100,
+  stopping_metric = "logloss",
+  stopping_tolerance = 1e-2,
+  ## stop when logloss does not improve by >=1% for 2 scoring events
+  stopping_rounds = 2,
+  #score_validation_samples = 10000,
+  ## downsample validation set for faster scoring
+  score_duty_cycle = 0.025,
+  ## don't score more than 2.5% of the wall time
+  max_w2 = 10,
+  ## can help improve stability for Rectifier
+  hyper_params = hyper_params,
+  search_criteria = search_criteria
+  )
+  grid <-
+  h2o.getGrid("dl_grid_random", sort_by = "logloss", decreasing = FALSE)
+  model.dl <-
+  h2o.getModel(grid@model_ids[[1]]) ## model with lowest logloss
+  summary(model.dl)
+
+```
+Make predictions on the test set:
+```{r}
+preds <- h2o.predict(model.dl, test.hex)
+```
+# Submission
+Create a file to submit to Kaggle:
+  
+```{r}
+test.df %>%
+  dplyr::bind_cols(as.data.frame(preds$predict)) %>%
+  dplyr::select(PassengerId, Survived = predict) %>%
+  write.csv('kaggle_titanic_submission.csv', row.names = F)
+```
